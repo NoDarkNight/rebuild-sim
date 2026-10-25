@@ -39,11 +39,11 @@ The default bird's-eye camera sits high behind your robot, always facing the opp
 
 Up to six players (3v3); empty slots are parked robots.
 
-1. One player clicks **Host a room** and shares the 5-letter room code.
-2. Everyone else types the code and clicks **Join**.
-3. In the lobby, each player picks a robot and an alliance, and the host clicks **Start match**.
+1. One player opens **Multiplayer**, clicks **Create private room**, and shares the 5-letter code or the invite link.
+2. Everyone else enters the code and clicks **Join**, or opens the link. Joiners fill Red 1, Blue 1, Red 2, Blue 2, Red 3, Blue 3 in that order.
+3. In the room, each player picks a robot, can click an open slot to switch, and drags their robot on the map to set its starting spot (J and L turn it). The host can move anyone between slots, remove players, and place any robot, then clicks **Start match**.
 
-Only the host can restart (R) or send everyone back to the lobby (Esc).
+Only the host can restart (R) or send everyone back to the room (Esc). A player who closes the page or loses connection is removed from the room within about 8 seconds.
 
 **How it works:**
 - The host's browser runs the real match physics.

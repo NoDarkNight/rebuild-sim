@@ -7,6 +7,7 @@ import { Robot, DriveCommand, idleCommand } from './robot';
 import { Match } from './match';
 import type { DriverInput } from './input';
 import type { CameraRig } from './camera';
+import type { StartPose } from './lineup';
 
 /** One of the six robot positions: Red 1-3 are slots 0-2, Blue 1-3 are slots 3-5. */
 export interface SlotSetup {
@@ -15,6 +16,10 @@ export interface SlotSetup {
   /** Player id of whoever drives it, or null for a parked robot. */
   driver: string | null;
   name?: string;
+  /** Reserved for AI drivers. Until they exist the robot stays parked. */
+  ai?: string;
+  /** In Red's frame; defaults to the slot's usual spot. */
+  start?: StartPose;
 }
 
 /** solo: this browser runs everything. host: runs physics for everyone, takes remote
@@ -96,11 +101,11 @@ export class Game {
     const preload = this.preloadPerRobot();
     setup.slots.forEach((slot, i) => {
       const a = slotAlliance(i);
-      const start = CONFIG.startSlots[i % SLOTS_PER_ALLIANCE];
+      const start = slot.start ?? { ...CONFIG.startSlots[i % SLOTS_PER_ALLIANCE], yaw: 0 };
       const p = rotateForAlliance(a, start.x, start.z);
       const type: RobotTypeDef = types.find((t) => t.id === slot.typeId) ?? types[0];
       this.robots.push(new Robot(this.world, this.scene, {
-        alliance: a, type, teamNumber: slot.teamNumber, x: p.x, z: p.z, yaw: a === 'red' ? 0 : Math.PI, preload,
+        alliance: a, type, teamNumber: slot.teamNumber, x: p.x, z: p.z, yaw: start.yaw + (a === 'red' ? 0 : Math.PI), preload,
       }, slot.driver === null));
       this.drivers.push(slot.driver);
     });
