@@ -15,6 +15,10 @@ export class FuelSystem {
   readonly mesh: THREE.InstancedMesh;
   private free: number[] = [];
   private dirty = true;
+  private captures: { i: number; t: number; duration: number; start: THREE.Vector3;
+    path: (u: number, start: THREE.Vector3) => THREE.Vector3 }[] = [];
+  private readonly q = new THREE.Quaternion();
+  private readonly sc = new THREE.Vector3();
   private readonly m = new THREE.Matrix4();
   private readonly hidden = new THREE.Matrix4().makeScale(0, 0, 0);
 
@@ -23,7 +27,7 @@ export class FuelSystem {
     this.active = new Uint8Array(count);
     const F = CONFIG.fuel;
     const geo = new THREE.SphereGeometry(FUEL_RADIUS, F.sphereSegments, Math.max(6, F.sphereSegments * 0.66 | 0));
-    const mat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.fuel, roughness: 0.7 });
+    const mat = new THREE.MeshStandardMaterial({ color: CONFIG.colors.fuel, emissive: 0x2a2000, roughness: 0.55 });
     this.mesh = new THREE.InstancedMesh(geo, mat, count);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.castShadow = CONFIG.render.shadows;
@@ -77,6 +81,41 @@ export class FuelSystem {
     this.dirty = true;
   }
 
+  /**
+   * Take a ball off the field, but let it be seen going somewhere first (up an intake
+   * into a hopper, down into a Hub). `path(u, start)` gives its world position for
+   * u in 0..1; it shrinks out of sight near the end, then returns to the pool.
+   */
+  capture(i: number, path: (u: number, start: THREE.Vector3) => THREE.Vector3, duration: number) {
+    if (!this.active[i]) return;
+    const b = this.bodies[i];
+    const p = b.translation();
+    b.setEnabled(false);
+    this.active[i] = 0;
+    this.captures.push({ i, t: 0, duration, path, start: new THREE.Vector3(p.x, p.y, p.z) });
+  }
+
+  /** Advance capture animations. */
+  update(dt: number) {
+    if (!this.captures.length) return;
+    this.captures = this.captures.filter((c) => {
+      c.t += dt;
+      if (c.t < c.duration) return true;
+      this.free.push(c.i);
+      this.dirty = true;
+      return false;
+    });
+  }
+
+  /** Client: place one ball's instance directly from a snapshot (scale 0 hides it). */
+  setInstance(i: number, x: number, y: number, z: number, scale: number) {
+    this.mesh.setMatrixAt(i, scale <= 0.001 ? this.hidden : this.m.compose(this.sc.set(x, y, z), this.q, new THREE.Vector3(scale, scale, scale)));
+  }
+
+  commitInstances() {
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
   /** Copy body positions into the instanced mesh. Sleeping balls are skipped. */
   syncMeshes() {
     let changed = this.dirty;
@@ -91,6 +130,12 @@ export class FuelSystem {
     }
     if (this.dirty) {
       for (let i = 0; i < this.count; i++) if (!this.active[i]) this.mesh.setMatrixAt(i, this.hidden);
+    }
+    for (const c of this.captures) {
+      const u = Math.min(1, c.t / c.duration);
+      const s = u < 0.7 ? 1 : 1 - (u - 0.7) / 0.3;
+      this.mesh.setMatrixAt(c.i, this.m.compose(c.path(u, c.start), this.q, this.sc.setScalar(Math.max(0.001, s))));
+      changed = true;
     }
     this.dirty = false;
     if (changed) this.mesh.instanceMatrix.needsUpdate = true;

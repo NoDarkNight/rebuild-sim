@@ -20,7 +20,7 @@ export class Input {
 
   constructor(canvas: HTMLCanvasElement) {
     window.addEventListener('keydown', (e) => {
-      if (e.code === 'Tab') e.preventDefault();
+      if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);
       if (e.code === 'KeyR') this.emit('reset');
@@ -29,6 +29,8 @@ export class Input {
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => { this.keys.clear(); this.mouseDown = false; });
+    // A release outside the window never fires mouseup here; don't keep shooting.
+    window.addEventListener('mousemove', (e) => { if (!(e.buttons & 1)) this.mouseDown = false; });
     canvas.addEventListener('mousedown', (e) => { if (e.button === 0) this.mouseDown = true; });
     window.addEventListener('mouseup', (e) => { if (e.button === 0) this.mouseDown = false; });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -47,9 +49,9 @@ export class Input {
     const out: DriverInput = {
       forward: k('KeyW') - k('KeyS'),
       right: k('KeyD') - k('KeyA'),
-      turn: k('KeyQ') - k('KeyE'),
-      intake: this.keys.has('Space'),
-      shoot: this.keys.has('ShiftLeft') || this.mouseDown,
+      turn: k('KeyJ') - k('KeyL'),
+      intake: this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'),
+      shoot: this.keys.has('Space') || this.mouseDown,
     };
 
     const pad = navigator.getGamepads?.().find((p) => p && p.connected);

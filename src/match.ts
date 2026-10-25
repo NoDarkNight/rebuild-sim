@@ -79,6 +79,7 @@ export class Match {
   hubActive(a: Alliance, t = this.time): boolean {
     const p = this.periodAt(t);
     if (!p) return false;
+    if (p.id === 'transition') return CONFIG.match.transitionHubsActive;
     if (p.shift < 0) return true;
     if (!this.firstInactive) return true;
     const inactive = p.shift % 2 === 0 ? this.firstInactive : other(this.firstInactive);

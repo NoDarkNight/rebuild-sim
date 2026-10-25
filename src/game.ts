@@ -4,14 +4,50 @@ import { CONFIG, FUEL_RADIUS, Alliance, RobotTypeDef } from './config';
 import { buildField, Field, rotateForAlliance } from './field';
 import { FuelSystem } from './fuel';
 import { Robot, DriveCommand, idleCommand } from './robot';
-import { Match, other } from './match';
+import { Match } from './match';
 import type { DriverInput } from './input';
 import type { CameraRig } from './camera';
 
-export interface GameSetup {
+/** One of the six robot positions: Red 1-3 are slots 0-2, Blue 1-3 are slots 3-5. */
+export interface SlotSetup {
   typeId: string;
-  height: number;
-  alliance: Alliance;
+  teamNumber: number;
+  /** Player id of whoever drives it, or null for a parked robot. */
+  driver: string | null;
+  name?: string;
+}
+
+/** solo: this browser runs everything. host: runs physics for everyone, takes remote
+ *  players' commands. client: never steps physics, only shows the host's snapshots. */
+export type GameMode = 'solo' | 'host' | 'client';
+
+export interface GameSetup {
+  mode: GameMode;
+  /** This browser's player id; the robot whose driver matches is driven from local input. */
+  localId: string;
+  slots: SlotSetup[];
+}
+
+export const SLOTS_PER_ALLIANCE = 3;
+export const slotAlliance = (slot: number): Alliance => (slot < SLOTS_PER_ALLIANCE ? 'red' : 'blue');
+
+const randomTeamNumber = () => 100 + Math.floor(Math.random() * 9800);
+
+/** Solo match: you in slot 1 of your alliance, everyone else parked. */
+export function soloSetup(typeId: string, alliance: Alliance): GameSetup {
+  const types = CONFIG.robotTypes;
+  const slots: SlotSetup[] = [];
+  for (let i = 0; i < SLOTS_PER_ALLIANCE * 2; i++) {
+    const mine = i === (alliance === 'red' ? 0 : SLOTS_PER_ALLIANCE);
+    slots.push({ typeId: mine ? typeId : types[i % types.length].id, teamNumber: randomTeamNumber(), driver: mine ? 'local' : null });
+  }
+  return { mode: 'solo', localId: 'local', slots };
+}
+
+/** Fill every slot nobody claimed with a parked robot. */
+export function parkedSlot(i: number): SlotSetup {
+  const types = CONFIG.robotTypes;
+  return { typeId: types[i % types.length].id, teamNumber: randomTeamNumber(), driver: null };
 }
 
 interface PendingExit {
@@ -25,19 +61,26 @@ export class Game {
   readonly world: RAPIER.World;
   readonly field: Field;
   readonly fuel: FuelSystem;
+  /** Index = slot: Red 1-3, then Blue 1-3. */
   readonly robots: Robot[] = [];
+  /** The robot this browser drives (or watches, if it drives none). */
   readonly player: Robot;
+  readonly alliance: Alliance;
   readonly match = new Match();
   /** False for the idle field shown behind the menu. */
   readonly live: boolean;
+  readonly mode: GameMode;
 
   private simTime = 0;
   private accumulator = 0;
   private exits: PendingExit[] = [];
   private input: DriverInput = { forward: 0, right: 0, turn: 0, intake: false, shoot: false };
+  private remoteCommands = new Map<string, DriveCommand>();
+  private drivers: (string | null)[] = [];
 
   constructor(readonly setup: GameSetup, live: boolean) {
     this.live = live;
+    this.mode = setup.mode;
     const P = CONFIG.physics;
     this.world = new RAPIER.World({ x: 0, y: -P.gravity, z: 0 });
     this.world.timestep = P.timestep;
@@ -48,28 +91,24 @@ export class Game {
     this.field = buildField(this.world, this.scene);
     this.fuel = new FuelSystem(this.world, this.scene, CONFIG.fuel.total);
 
-    // Robots: the human takes slot 0 on their alliance; everyone else is parked.
+    // Robots by slot. Parked robots (no driver) just sit there as obstacles.
     const types = CONFIG.robotTypes;
-    const chosen = types.find((t) => t.id === setup.typeId) ?? types[0];
     const preload = this.preloadPerRobot();
-    let player: Robot | null = null;
-    let n = 0;
-    for (const a of [setup.alliance, other(setup.alliance)]) {
-      CONFIG.startSlots.forEach((slot, i) => {
-        const human = a === setup.alliance && i === 0;
-        const p = rotateForAlliance(a, slot.x, slot.z);
-        const type: RobotTypeDef = human ? chosen : types[n % types.length];
-        const height = human ? setup.height : n % 2 ? CONFIG.robot.heights.short : CONFIG.robot.heights.tall;
-        const robot = new Robot(this.world, this.scene, {
-          alliance: a, type, height, x: p.x, z: p.z, yaw: a === 'red' ? 0 : Math.PI, preload,
-        }, !human);
-        this.robots.push(robot);
-        if (human) player = robot;
-        n++;
-      });
-    }
-    this.player = player!;
+    setup.slots.forEach((slot, i) => {
+      const a = slotAlliance(i);
+      const start = CONFIG.startSlots[i % SLOTS_PER_ALLIANCE];
+      const p = rotateForAlliance(a, start.x, start.z);
+      const type: RobotTypeDef = types.find((t) => t.id === slot.typeId) ?? types[0];
+      this.robots.push(new Robot(this.world, this.scene, {
+        alliance: a, type, teamNumber: slot.teamNumber, x: p.x, z: p.z, yaw: a === 'red' ? 0 : Math.PI, preload,
+      }, slot.driver === null));
+      this.drivers.push(slot.driver);
+    });
+    const mine = setup.slots.findIndex((sl) => sl.driver === setup.localId);
+    this.player = this.robots[Math.max(0, mine)];
+    this.alliance = this.player.alliance;
     this.layoutFuel(preload);
+    this.fuel.syncMeshes(); // clients show this layout until the first snapshot lands
   }
 
   private preloadPerRobot() {
@@ -80,10 +119,10 @@ export class Game {
   }
 
   private setupScene() {
-    this.scene.background = new THREE.Color(0x14171c);
-    this.scene.fog = new THREE.Fog(0x14171c, 900, 1800);
-    this.scene.add(new THREE.HemisphereLight(0xdde6f0, 0x3a3530, 1.4));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    this.scene.background = new THREE.Color(0x161a21);
+    this.scene.fog = new THREE.Fog(0x161a21, 900, 1900);
+    this.scene.add(new THREE.HemisphereLight(0xdde6f0, 0x3a3530, 0.5));
+    const sun = new THREE.DirectionalLight(0xfff4e6, 1.7);
     sun.position.set(-150, 500, 220);
     if (CONFIG.render.shadows) {
       sun.castShadow = true;
@@ -125,8 +164,19 @@ export class Game {
     this.input = input;
   }
 
-  /** Advance by a frame's worth of time using fixed physics steps. */
+  /** Host: the latest command from a remote player. */
+  setRemoteCommand(playerId: string, cmd: DriveCommand) {
+    this.remoteCommands.set(playerId, cmd);
+  }
+
+  /** Advance by a frame's worth of time using fixed physics steps. Clients don't simulate;
+   *  their state arrives in snapshots, so this only keeps visuals ticking. */
   advance(frameDt: number, rig: CameraRig) {
+    if (this.mode === 'client') {
+      this.simTime += frameDt;
+      for (const r of this.robots) r.syncVisual(this.simTime);
+      return;
+    }
     const P = CONFIG.physics;
     this.accumulator = Math.min(this.accumulator + frameDt, P.timestep * P.maxSubSteps);
     while (this.accumulator >= P.timestep) {
@@ -141,19 +191,31 @@ export class Game {
     this.simTime += dt;
     if (this.live && !this.match.isFinal) this.match.update(dt);
 
-    this.player.command = this.playerCommand(rig);
+    const local = this.localCommand(rig);
+    this.robots.forEach((r, i) => {
+      const d = this.drivers[i];
+      if (d === null) return;
+      r.command = d === this.setup.localId ? local : this.gate(this.remoteCommands.get(d) ?? idleCommand());
+    });
     for (const r of this.robots) r.applyDrive(dt);
     this.world.step();
     for (const r of this.robots) r.update(dt, this.fuel, this.field.hubs[r.alliance]);
     this.checkHubs();
+    this.fuel.update(dt);
     this.processExits();
   }
 
-  private playerCommand(rig: CameraRig): DriveCommand {
+  /** Robots don't move before the match or after the final buzzer. */
+  private gate(cmd: DriveCommand): DriveCommand {
+    return !this.live || this.match.isOver ? idleCommand() : cmd;
+  }
+
+  /** What this browser's driver is asking for, in field coordinates. Clients send it to the host. */
+  localCommand(rig: CameraRig): DriveCommand {
     const m = this.match;
     if (!this.live || m.isOver) return idleCommand();
     const M = CONFIG.match;
-    if (m.isAuto) {
+    if (m.isAuto && !M.autoDriverControl) {
       // Simple auto: drive straight forward, then shoot the preload.
       const cmd = idleCommand();
       if (m.time < M.autoDriveTime) {
@@ -188,7 +250,9 @@ export class Game {
       if (p.y > H.height) continue;
       for (const hub of hubs) {
         if (Math.abs(p.x - hub.x) < hub.interiorHalf && Math.abs(p.z - hub.z) < hub.interiorHalf) {
-          fuel.despawn(i);
+          // Let it be seen dropping down into the Hub's funnel before it vanishes.
+          const sink = new THREE.Vector3(hub.x, H.height - 26, hub.z);
+          fuel.capture(i, (u, start) => start.clone().lerp(sink, u), H.sinkTime);
           if (this.live) this.match.recordScore(hub.alliance);
           this.exits.push({ at: this.simTime + H.exitDelay, hub: hub.alliance });
           break;
@@ -207,6 +271,14 @@ export class Game {
       const z = hub.z + (Math.random() * 2 - 1) * H.exitSpreadZ;
       this.fuel.spawn(x, H.exitHeight, z, hub.exitDir * speed, 0, (Math.random() - 0.5) * 30);
     }
+  }
+
+  /** Elapsed simulation time (seconds since this Game was built). */
+  get time() {
+    return this.simTime;
+  }
+  set time(t: number) {
+    this.simTime = t;
   }
 
   /** Hub rings glow when active. */
