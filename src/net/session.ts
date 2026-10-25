@@ -1,6 +1,7 @@
 import Peer, { type DataConnection } from 'peerjs';
-import { CONFIG, Alliance } from '../config';
-import { parkedSlot, SLOTS_PER_ALLIANCE, type SlotSetup } from '../game';
+import { CONFIG } from '../config';
+import type { SlotSetup } from '../game';
+import { emptyLineup, findPlayer, firstOpenSlot, lineupToSetup, placeStart, type LineupSlot, type StartPose } from '../lineup';
 import { hasRelay, iceServers } from './ice';
 
 /**
@@ -13,32 +14,33 @@ import { hasRelay, iceServers } from './ice';
  * commands, where a late packet is worse than a lost one.
  */
 
-export interface LobbyPlayer {
-  id: string;
-  name: string;
-  alliance: Alliance;
-  typeId: string;
-}
-
 type CtrlMsg =
-  | { t: 'hello'; name: string; alliance: Alliance; typeId: string }
-  | { t: 'set'; alliance?: Alliance; typeId?: string }
-  | { t: 'lobby'; players: LobbyPlayer[]; hostId: string }
+  | { t: 'hello'; name: string; typeId: string }
+  /** Change your own robot or start, or move yourself to an open slot. */
+  | { t: 'set'; typeId?: string; start?: StartPose; slot?: number }
+  | { t: 'room'; slots: LineupSlot[]; hostId: string }
   | { t: 'start'; slots: SlotSetup[] }
   | { t: 'end' }
-  | { t: 'full' };
+  | { t: 'full' }
+  | { t: 'kicked' }
+  | { t: 'ping' }
+  | { t: 'bye' };
 
-const MAX_PLAYERS = SLOTS_PER_ALLIANCE * 2;
 const ID_PREFIX = 'nomansland-';
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O or 1/I
+/** Browsers often never report a closed tab or a dropped network, so both sides ping
+ *  and treat a quiet peer as gone. */
+const PING_MS = 2000;
+const TIMEOUT_MS = 8000;
 
 const randomCode = () => Array.from({ length: CONFIG.net.codeLength }, () => CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]).join('');
 
 export class NetSession {
-  players: LobbyPlayer[] = [];
+  /** The room's six positions. The host owns this; joiners get copies. */
+  slots: LineupSlot[] = emptyLineup();
   hostId = '';
 
-  onLobby: (players: LobbyPlayer[]) => void = () => {};
+  onRoom: () => void = () => {};
   onStart: (slots: SlotSetup[]) => void = () => {};
   onEnd: () => void = () => {};
   onSnapshot: (buf: ArrayBuffer) => void = () => {};
@@ -47,20 +49,28 @@ export class NetSession {
 
   private ctrl = new Map<string, DataConnection>();
   private state = new Map<string, DataConnection>();
+  private lastHeard = new Map<string, number>();
+  private pinger = 0;
   private closed = false;
 
-  private constructor(readonly role: 'host' | 'client', readonly code: string, private peer: Peer) {}
+  private constructor(readonly role: 'host' | 'client', readonly code: string, private peer: Peer) {
+    this.pinger = window.setInterval(() => this.heartbeat(), PING_MS);
+  }
 
   get selfId() {
     return this.peer.id;
   }
-  get self() {
-    return this.players.find((p) => p.id === this.selfId);
+  get isHost() {
+    return this.role === 'host';
+  }
+  /** Your slot index, or -1. */
+  get selfSlot() {
+    return findPlayer(this.slots, this.selfId);
   }
 
   // ---------- setup ----------
 
-  static async host(name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+  static async host(name: string, typeId: string): Promise<NetSession> {
     const config = { iceServers: await iceServers() };
     return new Promise((resolve, reject) => {
       const tryCode = (attempt: number) => {
@@ -69,7 +79,7 @@ export class NetSession {
         peer.once('open', () => {
           const s = new NetSession('host', code, peer);
           s.hostId = peer.id;
-          s.players = [{ id: peer.id, name, alliance, typeId }];
+          s.seat(peer.id, name, typeId);
           s.listen();
           resolve(s);
         });
@@ -84,7 +94,7 @@ export class NetSession {
     });
   }
 
-  static async join(code: string, name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+  static async join(code: string, name: string, typeId: string): Promise<NetSession> {
     const config = { iceServers: await iceServers() };
     return new Promise((resolve, reject) => {
       const peer = new Peer({ config });
@@ -97,25 +107,32 @@ export class NetSession {
       const timer = setTimeout(() => fail(hostAnswered() ? directFailure() : 'Timed out reaching that room.'), 12000);
       peer.once('error', (err) => fail(describe(err)));
       peer.once('open', () => {
-        const s = new NetSession('client', code.trim().toUpperCase(), peer);
-        s.hostId = hostPeerId;
         const ctrl = peer.connect(hostPeerId, { label: 'ctrl', reliable: true, serialization: 'json' });
         ctrlConn = ctrl;
         const state = peer.connect(hostPeerId, { label: 'state', reliable: false, serialization: 'raw' });
-        s.ctrl.set(hostPeerId, ctrl);
-        s.state.set(hostPeerId, state);
-        state.on('data', (d) => s.onSnapshot(d as ArrayBuffer));
-        ctrl.on('iceStateChanged', (st) => { if (st === 'failed') fail(directFailure()); });
-        let joined = false;
-        ctrl.on('open', () => ctrl.send({ t: 'hello', name, alliance, typeId } satisfies CtrlMsg));
+        let s: NetSession | null = null;
+        ctrl.on('iceStateChanged', (st) => { if (st === 'failed' && !s) fail(directFailure()); });
+        ctrl.on('open', () => ctrl.send({ t: 'hello', name, typeId } satisfies CtrlMsg));
         ctrl.on('data', (d) => {
           const msg = d as CtrlMsg;
-          if (msg.t === 'full') { fail('That room is full (6 players).'); return; }
-          if (!joined && msg.t === 'lobby') { joined = true; clearTimeout(timer); resolve(s); }
+          if (!s) {
+            if (msg.t === 'full') { fail('That room is full.'); return; }
+            if (msg.t !== 'room') return;
+            // Only now does the session exist, so its heartbeat can't fire before we're in.
+            clearTimeout(timer);
+            s = new NetSession('client', code.trim().toUpperCase(), peer);
+            s.hostId = hostPeerId;
+            s.ctrl.set(hostPeerId, ctrl);
+            s.state.set(hostPeerId, state);
+            const session = s;
+            state.on('data', (b) => session.onSnapshot(b as ArrayBuffer));
+            ctrl.on('close', () => session.close('The host left the room.'));
+            peer.on('disconnected', () => session.close('Lost connection to the host.'));
+            resolve(s);
+          }
+          s.lastHeard.set(hostPeerId, Date.now());
           s.handleFromHost(msg);
         });
-        ctrl.on('close', () => s.close('The host left the match.'));
-        peer.on('disconnected', () => s.close('Lost connection to the host.'));
       });
     });
   }
@@ -138,63 +155,100 @@ export class NetSession {
 
   private handleFromClient(conn: DataConnection, msg: CtrlMsg) {
     if (msg.t === 'hello') {
-      if (this.players.length >= MAX_PLAYERS) { conn.send({ t: 'full' } satisfies CtrlMsg); setTimeout(() => conn.close(), 300); return; }
+      if (findPlayer(this.slots, conn.peer) >= 0) return;
+      if (!this.seat(conn.peer, msg.name, msg.typeId)) {
+        conn.send({ t: 'full' } satisfies CtrlMsg);
+        setTimeout(() => conn.close(), 300);
+        return;
+      }
       this.ctrl.set(conn.peer, conn);
-      this.players.push({ id: conn.peer, name: cleanName(msg.name), alliance: this.allianceWithRoom(msg.alliance), typeId: msg.typeId });
-      this.broadcastLobby();
-    } else if (msg.t === 'set') {
-      this.updatePlayer(conn.peer, msg);
+      this.broadcastRoom();
+      return;
     }
+    if (findPlayer(this.slots, conn.peer) < 0) return; // kicked or timed out
+    this.lastHeard.set(conn.peer, Date.now());
+    if (msg.t === 'set') this.updatePlayer(conn.peer, msg);
+    else if (msg.t === 'bye') this.dropPlayer(conn.peer);
   }
 
-  private updatePlayer(id: string, change: { alliance?: Alliance; typeId?: string }) {
-    const p = this.players.find((q) => q.id === id);
-    if (!p) return;
-    if (change.typeId) p.typeId = change.typeId;
-    if (change.alliance && change.alliance !== p.alliance && this.count(change.alliance) < SLOTS_PER_ALLIANCE) p.alliance = change.alliance;
-    this.broadcastLobby();
+  /** Put a player in the next open slot. False if the room is full. */
+  private seat(id: string, name: string, typeId: string) {
+    const i = firstOpenSlot(this.slots);
+    if (i < 0) return false;
+    this.slots[i] = { ...this.slots[i], occupant: { kind: 'player', id, name: cleanName(name) }, typeId: validType(typeId) };
+    if (id !== this.selfId) this.lastHeard.set(id, Date.now());
+    return true;
   }
 
-  private count(a: Alliance) {
-    return this.players.filter((p) => p.alliance === a).length;
+  private updatePlayer(id: string, change: { typeId?: string; start?: StartPose; slot?: number }) {
+    let i = findPlayer(this.slots, id);
+    if (i < 0) return;
+    if (change.slot !== undefined && this.slots[change.slot] && !this.slots[change.slot].occupant) {
+      this.swap(i, change.slot);
+      i = change.slot;
+    }
+    if (change.typeId) this.slots[i].typeId = validType(change.typeId);
+    if (change.start) this.slots[i].start = placeStart(this.slots, i, change.start);
+    this.broadcastRoom();
   }
 
-  private allianceWithRoom(wanted: Alliance): Alliance {
-    if (this.count(wanted) < SLOTS_PER_ALLIANCE) return wanted;
-    return wanted === 'red' ? 'blue' : 'red';
+  /** Swap who sits in two slots. Each player keeps their robot; start spots stay with the slot. */
+  private swap(a: number, b: number) {
+    const A = this.slots[a], B = this.slots[b];
+    this.slots[a] = { ...A, occupant: B.occupant, typeId: B.typeId };
+    this.slots[b] = { ...B, occupant: A.occupant, typeId: A.typeId };
+  }
+
+  /** Host: move whoever is in one slot to another, swapping if it's taken. */
+  moveSlot(from: number, to: number) {
+    if (!this.isHost || from === to || !this.slots[from] || !this.slots[to]) return;
+    this.swap(from, to);
+    this.broadcastRoom();
+  }
+
+  /** Host: set any slot's start spot (players set their own through setSelf). */
+  setStart(i: number, pose: StartPose) {
+    if (!this.isHost || !this.slots[i]) return;
+    this.slots[i].start = placeStart(this.slots, i, pose);
+    this.broadcastRoom();
+  }
+
+  /** Host: remove a player from the room. */
+  kick(i: number) {
+    const o = this.slots[i]?.occupant;
+    if (!this.isHost || o?.kind !== 'player' || o.id === this.selfId) return;
+    const conn = this.ctrl.get(o.id);
+    conn?.send({ t: 'kicked' } satisfies CtrlMsg);
+    this.dropPlayer(o.id);
+    setTimeout(() => conn?.close(), 300);
   }
 
   private dropPlayer(id: string) {
     this.ctrl.delete(id);
     this.state.get(id)?.close();
     this.state.delete(id);
-    const before = this.players.length;
-    this.players = this.players.filter((p) => p.id !== id);
-    if (this.players.length !== before) this.broadcastLobby();
+    this.lastHeard.delete(id);
+    const i = findPlayer(this.slots, id);
+    if (i < 0) return;
+    this.slots[i] = { ...this.slots[i], occupant: null };
+    this.broadcastRoom();
   }
 
-  private broadcastLobby() {
-    const msg: CtrlMsg = { t: 'lobby', players: this.players, hostId: this.hostId };
+  private broadcastRoom() {
+    const msg: CtrlMsg = { t: 'room', slots: this.slots, hostId: this.hostId };
     for (const c of this.ctrl.values()) c.send(msg);
-    this.onLobby(this.players);
+    this.onRoom();
   }
 
-  /** Host: assign slots in join order per alliance, fill the rest with parked robots, and start everyone. */
+  /** Host: start everyone. Empty slots get parked robots. */
   startMatch(): SlotSetup[] {
-    const slots: SlotSetup[] = [];
-    for (const [k, a] of (['red', 'blue'] as Alliance[]).entries()) {
-      const team = this.players.filter((p) => p.alliance === a);
-      for (let i = 0; i < SLOTS_PER_ALLIANCE; i++) {
-        const idx = k * SLOTS_PER_ALLIANCE + i, p = team[i];
-        slots.push(p ? { ...parkedSlot(idx), typeId: p.typeId, driver: p.id, name: p.name } : parkedSlot(idx));
-      }
-    }
+    const { slots } = lineupToSetup(this.slots, 'host', this.selfId);
     for (const c of this.ctrl.values()) c.send({ t: 'start', slots } satisfies CtrlMsg);
     this.onStart(slots);
     return slots;
   }
 
-  /** Host: back to the lobby for everyone. */
+  /** Host: back to the room for everyone. */
   endMatch() {
     for (const c of this.ctrl.values()) c.send({ t: 'end' } satisfies CtrlMsg);
     this.onEnd();
@@ -212,9 +266,11 @@ export class NetSession {
   // ---------- client ----------
 
   private handleFromHost(msg: CtrlMsg) {
-    if (msg.t === 'lobby') { this.players = msg.players; this.hostId = msg.hostId; this.onLobby(this.players); }
+    if (msg.t === 'room') { this.slots = msg.slots; this.hostId = msg.hostId; this.onRoom(); }
     else if (msg.t === 'start') this.onStart(msg.slots);
     else if (msg.t === 'end') this.onEnd();
+    else if (msg.t === 'kicked') this.close('The host removed you from the room.');
+    else if (msg.t === 'bye') this.close('The host closed the room.');
   }
 
   sendCommand(buf: ArrayBuffer) {
@@ -224,19 +280,34 @@ export class NetSession {
 
   // ---------- both ----------
 
-  /** Change your own alliance or robot in the lobby. */
-  setSelf(change: { alliance?: Alliance; typeId?: string }) {
-    if (this.role === 'host') this.updatePlayer(this.selfId, change);
+  /** Change your own robot or start spot, or move to an open slot. */
+  setSelf(change: { typeId?: string; start?: StartPose; slot?: number }) {
+    if (this.isHost) this.updatePlayer(this.selfId, change);
     else this.ctrl.get(this.hostId)?.send({ t: 'set', ...change } satisfies CtrlMsg);
+  }
+
+  private heartbeat() {
+    const now = Date.now();
+    for (const c of this.ctrl.values()) if (c.open) c.send({ t: 'ping' } satisfies CtrlMsg);
+    for (const [id, t] of this.lastHeard) {
+      if (now - t < TIMEOUT_MS) continue;
+      if (this.isHost) this.dropPlayer(id);
+      else this.close('Lost connection to the host.');
+    }
   }
 
   close(reason = '') {
     if (this.closed) return;
     this.closed = true;
-    this.peer.destroy();
+    clearInterval(this.pinger);
+    // Best effort: tell the others now rather than leaving them to time out.
+    for (const c of this.ctrl.values()) if (c.open) c.send({ t: 'bye' } satisfies CtrlMsg);
+    setTimeout(() => this.peer.destroy(), 100);
     this.onClosed(reason);
   }
 }
+
+const validType = (id: string) => (CONFIG.robotTypes.some((t) => t.id === id) ? id : CONFIG.robotTypes[0].id);
 
 /** The room exists, but the two networks couldn't open a direct link and there's no relay to fall back on. */
 const directFailure = () =>

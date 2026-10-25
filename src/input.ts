@@ -20,6 +20,7 @@ export class Input {
 
   constructor(canvas: HTMLCanvasElement) {
     window.addEventListener('keydown', (e) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.code === 'Tab' || e.code === 'Space') e.preventDefault();
       if (e.repeat) return;
       this.keys.add(e.code);

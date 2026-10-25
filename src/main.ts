@@ -2,9 +2,11 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { CONFIG } from './config';
 import { Game, GameSetup, soloSetup, type SlotSetup } from './game';
+import { lineupToSetup } from './lineup';
 import { Input } from './input';
 import { CameraRig } from './camera';
-import { Hud, Menu } from './hud';
+import { Hud } from './hud';
+import { Menu } from './menu';
 import { NetSession } from './net/session';
 import { SnapshotBuffer, decodeCommand, decodeSnapshot, encodeCommand, encodeSnapshot, msgType, MsgType } from './net/protocol';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
@@ -27,7 +29,7 @@ const rig = new CameraRig(camera);
 const input = new Input(canvas);
 const hud = new Hud(document.getElementById('hud')!);
 
-type Screen = 'menu' | 'lobby' | 'playing' | 'results';
+type Screen = 'menu' | 'room' | 'playing' | 'results';
 let screen: Screen = 'menu';
 let setup: GameSetup = soloSetup(CONFIG.robotTypes[0].id, 'red');
 let game = makeGame(setup, false);
@@ -38,15 +40,20 @@ let snapshots: SnapshotBuffer | null = null;
 let netClock = 0;
 
 const menu = new Menu(document.getElementById('overlay')!, {
-  solo: (c) => startMatch(soloSetup(c.typeId, c.alliance)),
-  host: (c) => connect(() => NetSession.host(c.name, c.typeId, c.alliance), 'Creating a room…'),
-  join: (code, c) => connect(() => NetSession.join(code, c.name, c.typeId, c.alliance), `Joining ${code}…`),
-  lobbyChange: (change) => session?.setSelf(change),
-  lobbyStart: () => session?.startMatch(),
+  solo: (lineup) => startMatch(lineupToSetup(lineup, 'solo', 'local')),
+  host: (p) => connect(() => NetSession.host(p.name, p.typeId), 'Creating a room…'),
+  join: (code, p) => connect(() => NetSession.join(code, p.name, p.typeId), `Joining ${code}…`),
+  room: {
+    setSelf: (change) => session?.setSelf(change),
+    move: (from, to) => session?.moveSlot(from, to),
+    kick: (slot) => session?.kick(slot),
+    setStart: (slot, pose) => session?.setStart(slot, pose),
+    start: () => session?.startMatch(),
+  },
   leave: () => leaveSession(),
   again: () => (session ? session.startMatch() : startMatch(setup)),
-  backToLobby: () => session?.endMatch(),
-  toMenu: () => toMenu(),
+  backToRoom: () => session?.endMatch(),
+  toSolo: () => toMenu(),
 });
 
 function makeGame(s: GameSetup, live: boolean) {
@@ -72,22 +79,24 @@ function startMatch(s: GameSetup) {
 
 /** Leave whatever is running and show an idle field behind a menu screen. */
 function idleBackground() {
-  if (game.live) replaceGame(makeGame(soloSetup(menu.choice.typeId, menu.choice.alliance), false));
+  if (game.live) replaceGame(makeGame(soloSetup(menu.profile.typeId, 'red'), false));
   snapshots = null;
   hud.show(false);
 }
 
-function toMenu(message = '') {
+/** Back to singleplayer setup, or to the multiplayer screen with a reason after leaving a room. */
+function toMenu(onlineMessage?: string) {
   idleBackground();
   screen = 'menu';
-  menu.showPicker(message);
+  if (onlineMessage === undefined) menu.showSolo();
+  else menu.showOnline(onlineMessage);
 }
 
-function showLobby() {
+function showRoom() {
   if (!session) return;
   idleBackground();
-  screen = 'lobby';
-  menu.showLobby({ code: session.code, isHost: session.role === 'host', selfId: session.selfId, players: session.players });
+  screen = 'room';
+  menu.showRoom({ code: session.code, isHost: session.isHost, selfId: session.selfId, hostId: session.hostId, slots: session.slots });
 }
 
 async function connect(open: () => Promise<NetSession>, status: string) {
@@ -97,17 +106,17 @@ async function connect(open: () => Promise<NetSession>, status: string) {
     const s = await open();
     session = s;
     wire(s);
-    showLobby();
+    showRoom();
   } catch (err) {
     toMenu((err as Error).message);
   }
 }
 
 function wire(s: NetSession) {
-  s.onLobby = () => { if (screen === 'lobby') showLobby(); };
+  s.onRoom = () => { if (screen === 'room') showRoom(); };
   s.onStart = (slots: SlotSetup[]) =>
     startMatch({ mode: s.role === 'host' ? 'host' : 'client', localId: s.selfId, slots });
-  s.onEnd = () => showLobby();
+  s.onEnd = () => showRoom();
   s.onSnapshot = (buf) => {
     if (game.mode === 'client' && snapshots && msgType(buf) === MsgType.Snapshot) snapshots.push(decodeSnapshot(buf), performance.now() / 1000);
   };
@@ -121,7 +130,7 @@ function leaveSession(showMenu = true) {
   const s = session;
   session = null;
   if (s) { s.onClosed = () => {}; s.close(); }
-  if (showMenu) toMenu();
+  if (showMenu) toMenu('');
 }
 
 input.on((e) => {
@@ -131,10 +140,13 @@ input.on((e) => {
     if (!session) startMatch(setup);
     else if (session.role === 'host') session.startMatch();
   } else if (e === 'menu') {
-    if (!session) toMenu();
-    else if (session.role === 'host' && screen !== 'lobby') session.endMatch();
+    if (screen === 'menu') menu.back();
+    else if (!session) toMenu();
+    else if (session.isHost && screen !== 'room') session.endMatch();
   }
 });
+// Tell the room we're gone instead of leaving it to time out.
+window.addEventListener('pagehide', () => session?.close());
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -144,7 +156,15 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
-toMenu();
+// Invite links (?room=CODE) open the multiplayer screen with the code filled in.
+const invite = new URLSearchParams(location.search).get('room');
+idleBackground();
+if (invite) {
+  history.replaceState(null, '', location.pathname);
+  menu.showOnline('', invite);
+} else {
+  menu.showTitle();
+}
 
 /** Host sends snapshots and joiners send commands, each on its own fixed rate. */
 function netTick(dt: number) {
@@ -172,7 +192,7 @@ renderer.setAnimationLoop((now) => {
   game.updateHubVisuals();
   netTick(dt);
 
-  if (screen === 'menu' || screen === 'lobby') {
+  if (screen === 'menu' || screen === 'room') {
     rig.updateMenu(dt);
   } else {
     rig.update(dt, game.player, game.alliance, game.field.occluders);
