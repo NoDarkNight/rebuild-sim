@@ -9,6 +9,18 @@ npm install
 npm run dev
 ```
 
+## Deploying
+
+Every push to `main` builds the game and publishes it to GitHub Pages at https://nodarknight.github.io/rebuild-sim/ (`.github/workflows/deploy.yml`). To deploy by hand, run the **Deploy to GitHub Pages** workflow from the Actions tab.
+
+**One-time setup:** in the repo's Settings > Pages, set Source to **GitHub Actions**.
+
+GitHub serves project sites under `/<repo>/`, so the workflow builds with `BASE_PATH=/rebuild-sim/` (read in `vite.config.ts`). Local builds use `/`. To try a Pages-style build locally:
+
+```bash
+BASE_PATH=/rebuild-sim/ npm run build && npx vite preview --base /rebuild-sim/
+```
+
 ## Controls
 
 | Action | Keyboard / mouse | Gamepad |
