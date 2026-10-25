@@ -1,0 +1,13 @@
+# Cloudflare Worker that mints short-lived TURN credentials for online play.
+# Deploy: npx wrangler deploy   (from this folder, after `npx wrangler login`)
+name = "nml-turn"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[vars]
+# Pages allowed to request credentials: the live site and local dev/preview.
+ALLOWED_ORIGINS = "https://nodarknight.github.io,http://localhost:5173,http://localhost:4173"
+
+# Secrets, set once with `npx wrangler secret put <NAME>`:
+#   TURN_KEY_ID          the TURN key's ID (Cloudflare dashboard > Realtime > TURN)
+#   TURN_KEY_API_TOKEN   that key's API token

@@ -56,7 +56,13 @@ Connections are peer-to-peer WebRTC (`peerjs`). The free PeerJS cloud service on
 **Limits for now:**
 - Joiners feel their own inputs after a round trip plus the 100 ms smoothing delay. There's no client-side prediction yet.
 - If the host leaves, the match ends.
-- Some strict corporate or school networks block peer-to-peer connections, which would need a TURN relay server.
+- Players connect directly when their networks allow it. Two devices on different networks, mobile data, or strict routers often can't, and then they need a **TURN relay**. PeerJS's old built-in relays no longer exist, so none is configured by default. Without one, joining fails with "can't connect directly".
+
+### Adding a TURN relay
+
+The project includes a small Cloudflare Worker (`worker/`) that hands out short-lived Cloudflare TURN credentials. Setup takes about five minutes: [worker/README.md](worker/README.md).
+
+Once it's deployed, the site picks up the relay through the `TURN_CREDENTIALS_URL` repository secret, which the deploy workflow passes to the build. Relay settings are read at build time in `src/net/ice.ts`, which also accepts static credentials (`TURN_URLS`, `TURN_USERNAME`, `TURN_CREDENTIAL`) for other providers. Locally, use the same names with a `VITE_` prefix in `.env.local`. A relayed joiner uses about 170 MB per hour.
 
 ## Tuning
 

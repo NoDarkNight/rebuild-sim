@@ -294,6 +294,8 @@ export const CONFIG = {
     /** Skip a snapshot for a joiner whose channel has this much unsent data. */
     maxBufferedBytes: 64 * 1024,
     codeLength: 5,
+    /** Free public STUN servers. TURN relays come from build-time env (see net/ice.ts). */
+    stunUrls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'],
   },
 
   colors: {

@@ -32,6 +32,13 @@ jobs:
         env:
           # Project sites live under /<repo-name>/.
           BASE_PATH: /${{ github.event.repository.name }}/
+          # Optional TURN relay for online play across networks (see src/net/ice.ts).
+          # Set as repo secrets; unset ones are simply empty. Values end up in the
+          # public site, so use credentials meant for browser use.
+          VITE_TURN_CREDENTIALS_URL: ${{ secrets.TURN_CREDENTIALS_URL }}
+          VITE_TURN_URLS: ${{ secrets.TURN_URLS }}
+          VITE_TURN_USERNAME: ${{ secrets.TURN_USERNAME }}
+          VITE_TURN_CREDENTIAL: ${{ secrets.TURN_CREDENTIAL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

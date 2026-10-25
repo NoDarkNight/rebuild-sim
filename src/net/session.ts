@@ -1,6 +1,7 @@
 import Peer, { type DataConnection } from 'peerjs';
 import { CONFIG, Alliance } from '../config';
 import { parkedSlot, SLOTS_PER_ALLIANCE, type SlotSetup } from '../game';
+import { hasRelay, iceServers } from './ice';
 
 /**
  * Online play: one player hosts in their browser and runs the match; others join
@@ -59,11 +60,12 @@ export class NetSession {
 
   // ---------- setup ----------
 
-  static host(name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+  static async host(name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+    const config = { iceServers: await iceServers() };
     return new Promise((resolve, reject) => {
       const tryCode = (attempt: number) => {
         const code = randomCode();
-        const peer = new Peer(ID_PREFIX + code.toLowerCase());
+        const peer = new Peer(ID_PREFIX + code.toLowerCase(), { config });
         peer.once('open', () => {
           const s = new NetSession('host', code, peer);
           s.hostId = peer.id;
@@ -82,21 +84,28 @@ export class NetSession {
     });
   }
 
-  static join(code: string, name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+  static async join(code: string, name: string, typeId: string, alliance: Alliance): Promise<NetSession> {
+    const config = { iceServers: await iceServers() };
     return new Promise((resolve, reject) => {
-      const peer = new Peer();
+      const peer = new Peer({ config });
       const hostPeerId = ID_PREFIX + code.trim().toLowerCase();
-      const timer = setTimeout(() => { peer.destroy(); reject(new Error('Timed out reaching that room.')); }, 12000);
+      let ctrlConn: DataConnection | null = null;
+      // If the host's answer came back through matchmaking, the room exists and only the
+      // direct link failed; say that instead of a generic timeout.
+      const hostAnswered = () => !!ctrlConn?.peerConnection?.remoteDescription;
       const fail = (msg: string) => { clearTimeout(timer); peer.destroy(); reject(new Error(msg)); };
+      const timer = setTimeout(() => fail(hostAnswered() ? directFailure() : 'Timed out reaching that room.'), 12000);
       peer.once('error', (err) => fail(describe(err)));
       peer.once('open', () => {
         const s = new NetSession('client', code.trim().toUpperCase(), peer);
         s.hostId = hostPeerId;
         const ctrl = peer.connect(hostPeerId, { label: 'ctrl', reliable: true, serialization: 'json' });
+        ctrlConn = ctrl;
         const state = peer.connect(hostPeerId, { label: 'state', reliable: false, serialization: 'raw' });
         s.ctrl.set(hostPeerId, ctrl);
         s.state.set(hostPeerId, state);
         state.on('data', (d) => s.onSnapshot(d as ArrayBuffer));
+        ctrl.on('iceStateChanged', (st) => { if (st === 'failed') fail(directFailure()); });
         let joined = false;
         ctrl.on('open', () => ctrl.send({ t: 'hello', name, alliance, typeId } satisfies CtrlMsg));
         ctrl.on('data', (d) => {
@@ -228,6 +237,12 @@ export class NetSession {
     this.onClosed(reason);
   }
 }
+
+/** The room exists, but the two networks couldn't open a direct link and there's no relay to fall back on. */
+const directFailure = () =>
+  hasRelay()
+    ? 'Found the room, but could not connect, even through the relay. Try another network.'
+    : 'Found the room, but your network and the host’s can’t connect directly. Online play across these networks needs a TURN relay (see README).';
 
 const cleanName = (n: string) => (n || 'Player').replace(/[<>&"]/g, '').slice(0, 16) || 'Player';
 
