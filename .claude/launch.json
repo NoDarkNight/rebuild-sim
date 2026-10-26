@@ -2,6 +2,6 @@
   "version": "0.0.1",
   "configurations": [
     { "name": "dev", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 5173 },
-    { "name": "pages-preview", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "preview", "--base", "/rebuild-sim/", "--port", "4173"], "port": 4173 }
+    { "name": "pages-preview", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "preview", "--base", "/rebuilt-sim/", "--port", "4173"], "port": 4173 }
   ]
 }

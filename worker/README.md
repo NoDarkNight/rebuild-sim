@@ -35,11 +35,11 @@ A tiny Cloudflare Worker that lets players on different networks connect for onl
 4. **Point the site at it.** Save the address plus `/ice` as the `TURN_CREDENTIALS_URL` repository secret, then redeploy the site:
 
    ```bash
-   gh secret set TURN_CREDENTIALS_URL --repo NoDarkNight/rebuild-sim --body "https://nml-turn.<your-subdomain>.workers.dev/ice"
+   gh secret set TURN_CREDENTIALS_URL --repo NoDarkNight/rebuilt-sim --body "https://nml-turn.<your-subdomain>.workers.dev/ice"
    ```
 
    ```bash
-   gh workflow run deploy.yml --repo NoDarkNight/rebuild-sim
+   gh workflow run deploy.yml --repo NoDarkNight/rebuilt-sim
    ```
 
 For local testing, put `VITE_TURN_CREDENTIALS_URL=<same URL>` in `.env.local` at the repo root and restart `npm run dev`.
